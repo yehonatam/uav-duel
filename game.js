@@ -44,10 +44,12 @@ const upgradeCost = lvl => 40 + lvl * 30;
 
 const PLAYERS = [
   { name: 'Player 1', color: '#52d6ff', up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', fire: 'Space',
-    buy: ['Digit1', 'Digit2', 'Digit3', 'Digit4'], buyLabels: ['1', '2', '3', '4'], ready: 'Space', readyLabel: 'SPACE',
+    buy: ['Digit1', 'Digit2', 'Digit3', 'Digit4'], buyLabels: ['1', '2', '3', '4'],
+    sell: ['KeyQ', 'KeyW', 'KeyE', 'KeyR'], sellLabels: ['Q', 'W', 'E', 'R'], ready: 'Space', readyLabel: 'SPACE',
     controls: 'WASD + SPACE' },
   { name: 'Player 2', color: '#ffa94d', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', fire: 'Enter',
-    buy: ['Digit7', 'Digit8', 'Digit9', 'Digit0'], buyLabels: ['7', '8', '9', '0'], ready: 'Enter', readyLabel: 'ENTER',
+    buy: ['Numpad1', 'Numpad2', 'Numpad3', 'Numpad4'], buyLabels: ['Num1', 'Num2', 'Num3', 'Num4'],
+    sell: ['Numpad5', 'Numpad6', 'Numpad7', 'Numpad8'], sellLabels: ['Num5', 'Num6', 'Num7', 'Num8'], ready: 'Enter', readyLabel: 'ENTER',
     controls: 'ARROWS + ENTER' },
 ];
 
@@ -229,6 +231,13 @@ function update(dt) {
         if (lvl < up.max && m.credits >= cost) { m.credits -= cost; m.levels[up.id]++; beep(700, 0.12, 'triangle', 0.07, 400); }
         else beep(120, 0.12, 'square', 0.05);
       });
+      p.sell.forEach((code, k) => {
+        if (!pressed.has(code)) return;
+        const up = UPGRADES[k];
+        const lvl = m.levels[up.id];
+        if (lvl > 0) { m.credits += upgradeCost(lvl - 1); m.levels[up.id]--; beep(300, 0.12, 'triangle', 0.07, -100); }
+        else beep(120, 0.12, 'square', 0.05);
+      });
       if (pressed.has(p.ready)) { m.ready = !m.ready; beep(500, 0.06, 'triangle', 0.05); }
     });
     if (meta.every(m => m.ready)) { roundNo++; startRound(); }
@@ -318,10 +327,12 @@ function drawShop() {
     ctx.strokeStyle = p.color; ctx.lineWidth = 2; ctx.strokeRect(x0, 110, w, 440);
     text(p.name, x0 + w / 2, 140, 24, p.color);
     text('Credits: ' + m.credits, x0 + w / 2, 172, 20, '#ffd166');
+    text('Refunds give back the full price', x0 + w / 2, 495, 13, '#8d96c9');
     UPGRADES.forEach((up, k) => {
       const y = 215 + k * 68, lvl = m.levels[up.id], cost = upgradeCost(lvl);
       const maxed = lvl >= up.max, afford = m.credits >= cost;
-      text(`[${p.buyLabels[k]}] ${up.label}`, x0 + 16, y, 18, '#e8ecff', 'left');
+      text(`${up.label}`, x0 + 16, y, 18, '#e8ecff', 'left');
+      text(`[${p.buyLabels[k]}] buy  [${p.sellLabels[k]}] refund`, x0 + 16 + 130, y, 13, '#8d96c9', 'left');
       text(up.fmt(stat(i, up.id)), x0 + w - 16, y, 18, p.color, 'right');
       for (let l = 0; l < up.max; l++) {
         ctx.fillStyle = l < lvl ? p.color : '#ffffff22';
