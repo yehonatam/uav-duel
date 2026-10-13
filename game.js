@@ -5,6 +5,7 @@ const ctx = canvas.getContext('2d');
 const W = canvas.width, H = canvas.height;   // screen size
 const WW = 2000, WH = 1250;                    // world size (bigger than the screen)
 const ROUNDS_TO_WIN = 3;
+const BOOST_MAX = 100;
 
 // ---------- Input ----------
 const keys = new Set();
@@ -44,16 +45,23 @@ const UPGRADES = [
 const upgradeCost = lvl => 40 + lvl * 30;
 
 const PLAYERS = [
-  { name: 'Player 1', color: '#52d6ff', up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', fire: 'Space',
+  { name: 'Player 1', color: '#52d6ff', up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', fire: 'Space', boost: 'ShiftLeft', boostLabel: 'L-SHIFT',
     buy: ['Digit1', 'Digit2', 'Digit3', 'Digit4'], buyLabels: ['1', '2', '3', '4'],
     sell: ['KeyQ', 'KeyW', 'KeyE', 'KeyR'], sellLabels: ['Q', 'W', 'E', 'R'], ready: 'Space', readyLabel: 'SPACE',
     weaponKeys: ['Digit5', 'Digit6', 'Digit7'], weaponLabels: ['5', '6', '7'],
     controls: 'WASD + SPACE' },
-  { name: 'Player 2', color: '#ffa94d', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', fire: 'Enter',
+  { name: 'Player 2', color: '#ffa94d', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', fire: 'Enter', boost: 'ShiftRight', boostLabel: 'R-SHIFT',
     buy: ['Numpad1', 'Numpad2', 'Numpad3', 'Numpad4'], buyLabels: ['Num1', 'Num2', 'Num3', 'Num4'],
     sell: ['Numpad5', 'Numpad6', 'Numpad7', 'Numpad8'], sellLabels: ['Num5', 'Num6', 'Num7', 'Num8'], ready: 'Enter', readyLabel: 'ENTER',
     weaponKeys: ['Numpad9', 'NumpadDivide', 'NumpadMultiply'], weaponLabels: ['Num9', 'Num/', 'Num*'],
     controls: 'ARROWS + ENTER' },
+];
+
+const UAV_TYPES = [
+  { name: 'Falcon', desc: 'Balanced all-rounder', speed: 1,    damage: 1,    health: 1,    look: 'quad' },
+  { name: 'Hornet', desc: 'Fast but fragile',     speed: 1.25, damage: 0.9,  health: 0.7,  look: 'dart' },
+  { name: 'Bulldog', desc: 'Slow armoured tank',  speed: 0.85, damage: 1,    health: 1.6,  look: 'hex' },
+  { name: 'Viper',  desc: 'Hard hitting glass cannon', speed: 1, damage: 1.4, health: 0.8, look: 'wing' },
 ];
 
 const WEAPONS = [
@@ -88,13 +96,14 @@ let shake = 0;
 let roundNo = 1;
 let message = '';
 let uavs = [], bullets = [], particles = [];
-const meta = PLAYERS.map(() => ({ wins: 0, credits: 0, levels: { damage: 0, health: 0, speed: 0, rate: 0 }, ready: false,
-  owned: { blaster: true }, weapon: 'blaster' }));
+const meta = PLAYERS.map((_, i) => ({ wins: 0, credits: 0, levels: { damage: 0, health: 0, speed: 0, rate: 0 }, ready: false,
+  owned: { blaster: true }, weapon: 'blaster', type: i, picked: false, boost: BOOST_MAX }));
 const cam = { x: WW / 2, y: WH / 2, zoom: 1 };
 
 function stat(i, id) {
   const u = UPGRADES.find(x => x.id === id);
-  return u.base + u.step * meta[i].levels[id];
+  const mult = UAV_TYPES[meta[i].type][id] || 1;
+  return u.base * mult + u.step * meta[i].levels[id];
 }
 
 function spawnUavs() {
@@ -102,18 +111,21 @@ function spawnUavs() {
     const maxHp = stat(i, 'health');
     return {
       i, x: i === 0 ? 150 : WW - 150, y: WH / 2, speed: VMIN,
-      angle: i === 0 ? 0 : Math.PI, hp: maxHp, maxHp, cooldown: 0, flash: 0, alive: true, spin: 0, dealt: 0,
+      angle: i === 0 ? 0 : Math.PI, hp: maxHp, maxHp, cooldown: 0, flash: 0, alive: true, spin: 0, dealt: 0, bump: 0, boosting: false,
     };
   });
   bullets = [];
+  meta.forEach(m => { m.boost = BOOST_MAX; });
 }
 
 function setState(s) { state = s; stateTime = 0; }
 
 function resetMatch() {
+  meta.forEach(m => { m.picked = false; });
   meta.forEach(m => { m.wins = 0; m.credits = 0; m.ready = false; for (const k in m.levels) m.levels[k] = 0; m.owned = { blaster: true }; m.weapon = 'blaster'; });
   roundNo = 1;
-  startRound();
+  uavs = []; bullets = [];
+  setState('select');
 }
 
 function startRound() {
@@ -144,6 +156,44 @@ const VMIN = 70;          // stall-free cruise speed: drones never hover
 const TURN_RADIUS = 55;   // tightest circle at a given speed: turn rate = speed / radius
 const ACCEL = 260, DRAG = 150;
 
+function hurt(target, amt, by, x, y) {
+  if (!target.alive || amt <= 0) return;
+  target.hp = Math.max(0, target.hp - amt);
+  target.flash = 0.12;
+  if (by !== null) uavs[by].dealt += amt;
+  burst(x, y, by === null ? '#ffd166' : PLAYERS[by].color, 10, 180, 0.4);
+  shake = Math.max(shake, 5);
+  beep(160, 0.12, 'sawtooth', 0.06, -80);
+  if (target.hp <= 0) {
+    target.alive = false;
+    burst(target.x, target.y, '#ffd166', 50, 320, 0.9);
+    burst(target.x, target.y, PLAYERS[target.i].color, 30, 220, 0.9);
+    shake = 16;
+    beep(110, 0.5, 'sawtooth', 0.1, -80);
+  }
+}
+
+// crash damage grows with speed; boosting into things hurts more
+const crashDmg = speed => 4 + Math.max(0, speed - VMIN) * 0.1;
+
+function collideUavs() {
+  const [a, b] = uavs;
+  if (!a.alive || !b.alive || state !== 'playing') return;
+  const d = Math.hypot(a.x - b.x, a.y - b.y);
+  if (d >= UAV_R * 2) return;
+  const ang = Math.atan2(b.y - a.y, b.x - a.x);
+  const push = (UAV_R * 2 - d) / 2 + 1;
+  a.x -= Math.cos(ang) * push; a.y -= Math.sin(ang) * push;
+  b.x += Math.cos(ang) * push; b.y += Math.sin(ang) * push;
+  if (a.bump > 0 || b.bump > 0) return;
+  const sa = a.speed, sb = b.speed;
+  hurt(a, crashDmg(sb), 1, (a.x + b.x) / 2, (a.y + b.y) / 2);
+  hurt(b, crashDmg(sa), 0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+  a.angle = ang + Math.PI; b.angle = ang;
+  a.speed = Math.max(VMIN, sa * 0.5); b.speed = Math.max(VMIN, sb * 0.5);
+  a.bump = b.bump = 0.4;
+}
+
 const FIRE = {
   blaster: u => [{ spd: 620, life: 1.6, dmg: stat(u.i, 'damage'), cd: stat(u.i, 'rate'), r: 3, angles: [0], falloff: false }],
   flare:   u => [{ spd: 520, life: 0.3, dmg: stat(u.i, 'damage') * 1.1, cd: stat(u.i, 'rate') * 2.2, r: 4, falloff: true,
@@ -161,7 +211,13 @@ function updateUav(u, dt) {
   const dx = (keys.has(p.right) ? 1 : 0) - (keys.has(p.left) ? 1 : 0);
   const dy = (keys.has(p.down) ? 1 : 0) - (keys.has(p.up) ? 1 : 0);
   const input = dx !== 0 || dy !== 0;
-  const vmax = stat(u.i, 'speed');
+  const m = meta[u.i];
+  u.bump = Math.max(0, u.bump - dt);
+  // booster: burns energy for a big speed/acceleration kick, recharges when idle
+  u.boosting = keys.has(p.boost) && m.boost > 0 && u.alive;
+  if (u.boosting) m.boost = Math.max(0, m.boost - 35 * dt);
+  else m.boost = Math.min(BOOST_MAX, m.boost + 12 * dt);
+  const vmax = stat(u.i, 'speed') * (u.boosting ? 1.6 : 1);
 
   // steering: rotate toward the wanted heading, limited by the minimum turn radius
   let turned = 0;
@@ -173,8 +229,8 @@ function updateUav(u, dt) {
     u.angle += turned;
   }
   // speed physics: thrust while steering, drag back to cruise otherwise, sharp turns bleed speed
-  const target = input ? vmax : VMIN;
-  const rate = target > u.speed ? ACCEL : DRAG;
+  const target = input || u.boosting ? vmax : VMIN;
+  const rate = target > u.speed ? ACCEL * (u.boosting ? 2 : 1) : DRAG;
   u.speed += Math.max(-rate * dt, Math.min(rate * dt, target - u.speed));
   u.speed -= Math.abs(turned) * u.speed * 0.2;
   u.speed = Math.max(VMIN, Math.min(vmax, u.speed));
@@ -187,7 +243,13 @@ function updateUav(u, dt) {
   let ny = u.y + vy * dt;
   if (ny < UAV_R || ny > WH - UAV_R || hitsWall(u.x, ny, UAV_R)) { ny = u.y; u.angle = -u.angle; hit = true; }
   u.y = ny;
-  if (hit) u.speed = Math.max(VMIN, u.speed * 0.5);
+  if (hit) {
+    if (state === 'playing' && u.bump === 0) {
+      hurt(u, crashDmg(u.speed), null, u.x, u.y);
+      u.bump = 0.3;
+    }
+    u.speed = Math.max(VMIN, u.speed * 0.5);
+  }
 
   if (state === 'playing' && keys.has(p.fire) && u.cooldown === 0) {
     const w = meta[u.i].weapon;
@@ -219,19 +281,7 @@ function updateBullets(dt) {
       // flare pellets lose damage with distance travelled (full punch only up close)
       const dmg = b.falloff ? b.dmg * (0.3 + 0.7 * (b.life / b.maxLife)) : b.dmg;
       b.life = 0;
-      target.hp = Math.max(0, target.hp - dmg);
-      target.flash = 0.12;
-      uavs[b.owner].dealt += dmg;
-      burst(b.x, b.y, PLAYERS[b.owner].color, 10, 180, 0.4);
-      shake = Math.max(shake, 5);
-      beep(160, 0.12, 'sawtooth', 0.06, -80);
-      if (target.hp <= 0) {
-        target.alive = false;
-        burst(target.x, target.y, '#ffd166', 50, 320, 0.9);
-        burst(target.x, target.y, PLAYERS[target.i].color, 30, 220, 0.9);
-        shake = 16;
-        beep(110, 0.5, 'sawtooth', 0.1, -80);
-      }
+      hurt(target, dmg, b.owner, b.x, b.y);
     }
   }
   bullets = bullets.filter(b => b.life > 0);
@@ -262,11 +312,22 @@ function update(dt) {
 
   if (state === 'menu') {
     if (pressed.has('Space') || pressed.has('Enter')) resetMatch();
+  } else if (state === 'select') {
+    PLAYERS.forEach((p, i) => {
+      const m = meta[i], n = UAV_TYPES.length;
+      if (!m.picked) {
+        if (pressed.has(p.left)) { m.type = (m.type + n - 1) % n; beep(400, 0.05, 'triangle', 0.05); }
+        if (pressed.has(p.right)) { m.type = (m.type + 1) % n; beep(400, 0.05, 'triangle', 0.05); }
+      }
+      if (pressed.has(p.ready)) { m.picked = !m.picked; beep(500, 0.06, 'triangle', 0.05); }
+    });
+    if (meta.every(m => m.picked)) startRound();
   } else if (state === 'countdown') {
     uavs.forEach(u => updateUav(u, dt));
     if (stateTime > 3) { setState('playing'); beep(880, 0.25, 'square', 0.06); }
   } else if (state === 'playing') {
     uavs.forEach(u => updateUav(u, dt));
+    collideUavs();
     updateBullets(dt);
     endRoundIfNeeded();
   } else if (state === 'roundEnd') {
@@ -344,28 +405,50 @@ function drawBackground() {
   ctx.strokeStyle = '#7fd6ff66'; ctx.lineWidth = 4; ctx.strokeRect(0, 0, WW, WH);
 }
 
+// per-type silhouettes: rotor positions, body shape, nose
+const LOOKS = {
+  quad: { rotors: [[-15, -15], [15, -15], [-15, 15], [15, 15]], rr: 9, body: 'circle', nose: 15 },
+  dart: { rotors: [[-8, -18], [-8, 18]], rr: 8, body: 'dart', nose: 22 },
+  hex:  { rotors: [[-17, -17], [17, -17], [-17, 17], [17, 17], [0, -22], [0, 22]], rr: 8, body: 'hex', nose: 15 },
+  wing: { rotors: [[-4, -22], [-4, 22]], rr: 7, body: 'wing', nose: 20 },
+};
+
+// leaves the context rotated to `angle` (callers wrap in save/restore)
+function drawUavShape(L, col, spin, angle) {
+  ctx.strokeStyle = '#3a4070'; ctx.lineWidth = 3;
+  for (const [rx, ry] of L.rotors) {
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(rx, ry); ctx.stroke();
+    ctx.save(); ctx.translate(rx, ry);
+    ctx.fillStyle = col + '44'; ctx.beginPath(); ctx.arc(0, 0, L.rr, 0, Math.PI * 2); ctx.fill();
+    ctx.rotate(spin); ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-L.rr, 0); ctx.lineTo(L.rr, 0); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.rotate(angle);
+  ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (L.body === 'circle') ctx.arc(0, 0, 9, 0, Math.PI * 2);
+  else if (L.body === 'hex') for (let k = 0; k < 6; k++) { const a = k * Math.PI / 3; ctx.lineTo(Math.cos(a) * 12, Math.sin(a) * 12); }
+  else if (L.body === 'dart') { ctx.moveTo(22, 0); ctx.lineTo(-10, -7); ctx.lineTo(-6, 0); ctx.lineTo(-10, 7); }
+  else { ctx.moveTo(20, 0); ctx.lineTo(-10, -20); ctx.lineTo(-4, 0); ctx.lineTo(-10, 20); }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#0a0d24';
+  ctx.beginPath(); ctx.moveTo(L.nose - 2, 0); ctx.lineTo(L.nose - 11, -4); ctx.lineTo(L.nose - 11, 4); ctx.closePath(); ctx.fill();
+  ctx.stroke();
+}
+
 function drawUav(u) {
   if (!u.alive) return;
   const col = u.flash > 0 ? '#ffffff' : PLAYERS[u.i].color;
   ctx.save();
   ctx.translate(u.x, u.y);
   ctx.scale(0.5, 0.5);
-  // arms + rotors (not rotated so rotors stay diagonal)
-  ctx.strokeStyle = '#3a4070'; ctx.lineWidth = 3;
-  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(sx * 15, sy * 15); ctx.stroke();
-    ctx.save(); ctx.translate(sx * 15, sy * 15);
-    ctx.fillStyle = col + '44'; ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
-    ctx.rotate(u.spin); ctx.strokeStyle = col; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-9, 0); ctx.lineTo(9, 0); ctx.stroke();
-    ctx.restore();
+  const L = LOOKS[UAV_TYPES[meta[u.i].type].look];
+  drawUavShape(L, col, u.spin, u.angle);
+  if (u.boosting) {
+    ctx.fillStyle = '#ffd166cc'; ctx.beginPath();
+    ctx.moveTo(-12, -5); ctx.lineTo(-30 - Math.random() * 12, 0); ctx.lineTo(-12, 5); ctx.closePath(); ctx.fill();
   }
-  // body + nose pointing in aim direction
-  ctx.rotate(u.angle);
-  ctx.fillStyle = col; ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#0a0d24';
-  ctx.beginPath(); ctx.moveTo(15, 0); ctx.lineTo(5, -5); ctx.lineTo(5, 5); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
   ctx.restore();
   // small health bar above drone
   const bw = 28, f = u.hp / u.maxHp;
@@ -394,8 +477,11 @@ function drawHud() {
   });
   text('Round ' + roundNo, W / 2, 28, 18, '#8d96c9');
   uavs.forEach((u, i) => {
-    const right = i === 1, bx = right ? W - 20 : 20;
-    text(WEAPONS.find(w => w.id === meta[i].weapon).name, bx, 76, 14, '#8d96c9', right ? 'right' : 'left');
+    const right = i === 1, bx = right ? W - 20 : 20, bw = 120, f = meta[i].boost / BOOST_MAX;
+    ctx.fillStyle = '#00000099'; ctx.fillRect(right ? bx - bw : bx, 88, bw, 8);
+    ctx.fillStyle = '#ffd166'; ctx.fillRect(right ? bx - bw * f : bx, 88, bw * f, 8);
+    text('BOOST ' + PLAYERS[i].boostLabel, bx, 106, 11, '#8d96c9', right ? 'right' : 'left');
+    text(UAV_TYPES[meta[i].type].name + ' · ' + WEAPONS.find(w => w.id === meta[i].weapon).name, bx, 76, 14, '#8d96c9', right ? 'right' : 'left');
   });
 }
 
@@ -435,6 +521,30 @@ function drawShop() {
   });
 }
 
+function drawSelect() {
+  ctx.fillStyle = '#05060fee'; ctx.fillRect(0, 0, W, H);
+  text('CHOOSE YOUR UAV', W / 2, 50, 34, '#7fd6ff');
+  PLAYERS.forEach((p, i) => {
+    const m = meta[i], t = UAV_TYPES[m.type], x0 = i === 0 ? 40 : W / 2 + 20, w = W / 2 - 60, cx = x0 + w / 2;
+    ctx.strokeStyle = m.picked ? '#5be37d' : p.color; ctx.lineWidth = 2; ctx.strokeRect(x0, 90, w, 470);
+    text(p.name, cx, 120, 24, p.color);
+    text('◀  ' + t.name + '  ▶', cx, 170, 28);
+    text(t.desc, cx, 202, 15, '#8d96c9');
+    ctx.save(); ctx.translate(cx, 270); ctx.scale(2.2, 2.2);
+    drawUavShape(LOOKS[t.look], p.color, performance.now() / 1000 * 40, 0);
+    ctx.restore();
+    [['Speed', 'speed'], ['Damage', 'damage'], ['Health', 'health']].forEach(([label, key], k) => {
+      const y = 360 + k * 44, v = t[key];
+      text(label, x0 + 24, y, 16, '#e8ecff', 'left');
+      ctx.fillStyle = '#ffffff22'; ctx.fillRect(x0 + 120, y - 7, w - 150, 14);
+      ctx.fillStyle = p.color; ctx.fillRect(x0 + 120, y - 7, (w - 150) * Math.min(1, v / 1.8), 14);
+      text('x' + v.toFixed(2), x0 + w - 20, y, 13, '#8d96c9', 'right');
+    });
+    text(m.picked ? 'LOCKED IN' : (i === 0 ? 'A / D to browse' : '← / → to browse'), cx, 510, 16, m.picked ? '#5be37d' : '#8d96c9');
+    text(m.picked ? `${p.readyLabel} to change` : `${p.readyLabel} to confirm`, cx, 536, 16, m.picked ? '#5be37d' : '#fff');
+  });
+}
+
 function drawOverlayScreens() {
   if (state === 'menu') {
     ctx.fillStyle = '#05060fcc'; ctx.fillRect(0, 0, W, H);
@@ -446,9 +556,11 @@ function drawOverlayScreens() {
       text(p.controls, x, 330, 20);
       text(i === 0 ? 'Move: W A S D  ·  Shoot: SPACE' : 'Move: ← ↑ ↓ →  ·  Shoot: ENTER', x, 362, 15, '#8d96c9');
     });
-    text('Drones always fly forward and turn in a wide arc - steer with your keys, hold to speed up.', W / 2, 430, 16, '#8d96c9');
+    text('Drones always fly forward and turn in a wide arc - steer with your keys. SHIFT = booster. Crashing hurts!', W / 2, 430, 16, '#8d96c9');
     text('Earn credits each round to buy upgrades and weapons. The map changes every round.   P = pause', W / 2, 456, 16, '#8d96c9');
     if (Math.floor(performance.now() / 500) % 2) text('Press SPACE or ENTER to start', W / 2, 530, 24, '#fff');
+  } else if (state === 'select') {
+    drawSelect();
   } else if (state === 'countdown') {
     text(String(Math.max(1, 3 - Math.floor(stateTime))), W / 2, H / 2, 120, '#ffffffcc');
     text('Round ' + roundNo, W / 2, H / 2 - 100, 28, '#8d96c9');
@@ -478,7 +590,7 @@ function draw() {
   ctx.save();
   ctx.translate(W / 2, H / 2); ctx.scale(cam.zoom, cam.zoom); ctx.translate(-cam.x, -cam.y);
   drawBackground();
-  if (state !== 'menu' && state !== 'shop') {
+  if (state === 'countdown' || state === 'playing' || state === 'roundEnd' || state === 'matchEnd') {
     bullets.forEach(b => {
       const col = b.kind === 'flare' ? '#ff8a3d' : b.kind === 'rail' ? '#ffffff' : PLAYERS[b.owner].color;
       ctx.fillStyle = col;
@@ -494,7 +606,7 @@ function draw() {
     ctx.globalAlpha = 1;
   }
   ctx.restore();
-  if (state !== 'menu' && state !== 'shop') drawHud();
+  if (state === 'countdown' || state === 'playing' || state === 'roundEnd' || state === 'matchEnd') drawHud();
   drawOverlayScreens();
   ctx.restore();
 }
